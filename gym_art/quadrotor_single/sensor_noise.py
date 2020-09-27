@@ -5,6 +5,9 @@ from numpy.random import uniform
 import matplotlib.pyplot as plt
 from math import exp
 from gym_art.quadrotor_single.quad_utils import quat2R, quatXquat
+from gym_art.quadrotor_multi.quad_utils import quat2R_numba, quatXquat_numba
+from gym_art.quadrotor_multi.sensor_noise import quat_from_small_angle_numba, rot2quat_numba
+from numba import njit
 
 def quat_from_small_angle(theta):
     assert theta.shape == (3,)
@@ -158,6 +161,54 @@ class SensorNoise:
 
         return noisy_pos, noisy_vel, noisy_rot, noisy_omega, noisy_acc
 
+    def add_noise_numba(self, pos, vel, rot, omega, acc, dt):
+        if self.bypass:
+            return pos, vel, rot, omega, acc
+        # """
+        # Args:
+        #     pos: ground truth of the position in world frame
+        #     vel: ground truth if the linear velocity in world frame
+        #     rot: ground truth of the orientation in rotational matrix / quaterions / euler angles
+        #     omega: ground truth of the angular velocity in body frame
+        #     dt: integration step
+        # """
+        assert pos.shape == (3,)
+        assert vel.shape == (3,)
+        assert omega.shape == (3,)
+
+        noisy_pos, noisy_vel, noisy_omega, noisy_acc, theta = add_noise_to_vel_acc_pos_omega_rot(
+            pos, vel, omega, acc,
+            pos_rand_var=(self.pos_norm_std, self.pos_unif_range),
+            vel_rand_var=(self.vel_norm_std, self.vel_unif_range),
+            omega_rand_var=self.gyro_noise_density,
+            acc_rand_var=(self.acc_static_noise_std, self.acc_dynamic_noise_ratio),
+            rot_rand_var=(self.quat_norm_std, self.quat_unif_range),
+        )
+
+        # Noise in omega
+        if self.gyro_norm_std != 0.:
+            noisy_omega = self.add_noise_to_omega(omega, dt)
+
+        if rot.shape == (3,):
+            # Euler angles (xyz: roll=[-pi, pi], pitch=[-pi/2, pi/2], yaw = [-pi, pi])
+            noisy_rot = np.clip(rot + theta,
+                                a_min=[-np.pi, -np.pi / 2, -np.pi],
+                                a_max=[np.pi, np.pi / 2, np.pi])
+        elif rot.shape == (3, 3):
+            # Rotation matrix
+            quat_theta = quat_from_small_angle_numba(theta)
+            quat = rot2quat_numba(rot)
+            noisy_quat = quatXquat_numba(quat, quat_theta)
+            noisy_rot = quat2R_numba(noisy_quat[0], noisy_quat[1], noisy_quat[2], noisy_quat[3])
+        elif rot.shape == (4,):
+            # Quaternion
+            quat_theta = quat_from_small_angle_numba(theta)
+            noisy_rot = quatXquat_numba(rot, quat_theta)
+        else:
+            raise ValueError("ERROR: SensNoise: Unknown rotation type: " + str(rot))
+
+        return noisy_pos, noisy_vel, noisy_rot, noisy_omega, noisy_acc
+
     ## copy from rotorS imu plugin
     def add_noise_to_omega(self, omega, dt):
         assert omega.shape == (3,)
@@ -169,6 +220,34 @@ class SensorNoise:
         self.gyro_bias = pi_g_d * self.gyro_bias + sigma_b_g_d * normal(0, 1, 3)
         return omega + self.gyro_bias + self.gyro_random_walk * normal(0, 1, 3) # + self.gyro_turn_on_bias_sigma * normal(0, 1, 3)
 
+@njit
+def add_noise_to_vel_acc_pos_omega_rot(
+        pos, vel, omega, acc, pos_rand_var, vel_rand_var, omega_rand_var,
+        acc_rand_var, rot_rand_var
+):
+    # add noise to position measurement
+    noisy_pos = pos + \
+                normal(loc=0., scale=pos_rand_var[0], size=3) + \
+                uniform(-pos_rand_var[1], pos_rand_var[1], 3)
+
+    # Add noise to linear velocity
+    noisy_vel = vel + \
+                normal(loc=0., scale=vel_rand_var[0], size=3) + \
+                uniform(-vel_rand_var[1], vel_rand_var[1], 3)
+
+    # Noise in omega
+    noisy_omega = omega + \
+                  normal(loc=0., scale=omega_rand_var, size=3)
+
+    # Noise in rotation
+    theta = normal(loc=0, scale=rot_rand_var[0], size=3) + \
+            uniform(-rot_rand_var[1], rot_rand_var[1], 3)
+
+    # Accelerometer noise
+    noisy_acc = acc + normal(loc=0., scale=acc_rand_var[0], size=3) + \
+                (acc * normal(loc=0., scale=acc_rand_var[1], size=3))
+
+    return noisy_pos, noisy_vel, noisy_omega, noisy_acc, theta
 
 if __name__ == "__main__":
     sens = SensorNoise()
