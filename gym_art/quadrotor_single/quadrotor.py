@@ -10,7 +10,7 @@ James Preiss, Artem Molchanov, Tao Chen
 
 References:
 [1] RotorS: https://www.researchgate.net/profile/Fadri_Furrer/publication/309291237_RotorS_-_A_Modular_Gazebo_MAV_Simulator_Framework/links/5a0169c4a6fdcc82a3183f8f/RotorS-A-Modular-Gazebo-MAV-Simulator-Framework.pdf
-[2] CrazyFlie modelling: http://mikehamer.irew_coeffnfo/assets/papers/Crazyflie%20Modelling.pdf
+[2] CrazyFlie modelling: http://mikehamer.info/assets/papers/Crazyflie%20Modelling.pdf
 [3] HummingBird: http://www.asctec.de/en/uav-uas-drones-rpas-roav/asctec-hummingbird/
 [4] CrazyFlie thrusters transition functions: https://www.bitcraze.io/2015/02/measuring-propeller-rpm-part-3/
 [5] HummingBird modelling: https://digitalrepository.unm.edu/cgi/viewcontent.cgi?referer=https://www.google.com/&httpsredir=1&article=1189&context=ece_etds
@@ -33,11 +33,12 @@ from gym import utils as gym_utils
 from gym import spaces
 from gym.utils import seeding
 import gym.envs.registration as gym_reg
-from numba import njit
 
 ## MY LIBS
 import gym_art.quadrotor_single.quadrotor_randomization as quad_rand
 from gym_art.quadrotor_multi.numba_utils import OUNoiseNumba, numba_cross, angvel2thrust_numba
+from gym_art.quadrotor_multi.quadrotor_single import calculate_torque_integrate_rotations_and_update_omega, \
+    compute_velocity_and_acceleration
 from gym_art.quadrotor_single.quadrotor_control import *
 from gym_art.quadrotor_single.quadrotor_obstacles import *
 from gym_art.quadrotor_single.quadrotor_visualization import *
@@ -1542,94 +1543,6 @@ def parse_quad_args(argv):
 
     args = parser.parse_args(args=argv)
     return args
-
-@njit
-def calculate_torque_integrate_rotations_and_update_omega(thrust_cmds, dt, eps, motor_damp_time_up,
-                                                          motor_damp_time_down, thrust_cmds_damp,
-                                                          thrust_rot_damp, thr_noise, thrust_max, motor_linearity,
-                                                          prop_crossproducts, prop_ccw, torque_max, rot, omega,
-                                                          eye, since_last_svd, since_last_svd_limit, inertia,
-                                                          damp_omega_quadratic, omega_max, pos, vel):
-    # Filtering the thruster and adding noise
-    thrust_cmds = np.clip(thrust_cmds, 0., 1.)
-    motor_tau_up = 4 * dt / (motor_damp_time_up + eps)
-    motor_tau_down = 4 * dt / (motor_damp_time_down + eps)
-    motor_tau = motor_tau_up * np.ones(4)
-    motor_tau[thrust_cmds < thrust_cmds_damp] = motor_tau_down
-    motor_tau[motor_tau > 1.] = 1.
-
-    # Since NN commands thrusts we need to convert to rot vel and back
-    thrust_rot = thrust_cmds ** 0.5
-    thrust_rot_damp = motor_tau * (thrust_rot - thrust_rot_damp) + thrust_rot_damp
-    thrust_cmds_damp = thrust_rot_damp ** 2
-
-    # Adding noise
-    thrust_noise = thrust_cmds * thr_noise
-    thrust_cmds_damp = np.clip(thrust_cmds_damp + thrust_noise, 0.0, 1.0)
-    thrusts = thrust_max * angvel2thrust_numba(thrust_cmds_damp, motor_linearity)
-
-    # Prop cross-product gives torque directions
-    torques = prop_crossproducts * np.reshape(thrusts, (-1, 1))
-
-    # Additional torques along z-axis caused by propeller rotations
-    torques[:, 2] += torque_max * prop_ccw * thrust_cmds_damp
-
-    # Net torque: sum over propellers
-    thrust_torque = np.sum(torques, 0)
-
-    # Rotor drag and Rolling forces and moments
-    rotor_visc_torque = rotor_drag_force = np.zeros(3)
-
-    # (Square) Damping using torques (in case we would like to add damping using torques)
-    torque = thrust_torque + rotor_visc_torque
-    thrust = np.array([0, 0, np.sum(thrusts)])
-
-    # ROTATIONAL DYNAMICS
-    # Integrating rotations (based on current values)
-    omega_vec = rot @ omega
-    wx, wy, wz = omega_vec
-    omega_norm = np.linalg.norm(omega_vec)
-    if omega_norm != 0:
-        K = np.array([[0, -wz, wy], [wz, 0, -wx], [-wy, wx, 0]]) / omega_norm
-        rot_angle = omega_norm * dt
-        dRdt = eye + np.sin(rot_angle) * K + (1. - np.cos(rot_angle)) * (K @ K)
-        rot = dRdt @ rot
-
-    # SVD is not strictly required anymore. Performing it rarely, just in case
-    since_last_svd += dt
-    if since_last_svd > since_last_svd_limit:
-        u, s, v = np.linalg.svd(rot)
-        rot = u @ v
-        since_last_svd = 0
-
-    # COMPUTING OMEGA UPDATE
-    # Linear damping
-    omega_dot = ((1.0 / inertia) * (numba_cross(-omega, inertia * omega) + torque))
-
-    # Quadratic damping
-    omega_damp_quadratic = np.clip(damp_omega_quadratic * omega ** 2, 0.0, 1.0)
-    omega = omega + (1.0 - omega_damp_quadratic) * dt * omega_dot
-    omega = np.clip(omega, -omega_max, omega_max)
-
-    # Computing position
-    pos = pos + dt * vel
-
-    return motor_tau_up, motor_tau_down, thrust_rot_damp, thrust_cmds_damp, torques, \
-           torque, rot, since_last_svd, omega_dot, omega, pos, thrust, rotor_drag_force
-
-
-@njit
-def compute_velocity_and_acceleration(vel, grav_cnst_arr, mass, rot, sum_thr_drag, vel_damp, dt, rot_tpose,
-                                      grav_arr):
-    # Computing accelerations
-    acc = grav_cnst_arr + ((1.0 / mass) * (rot @ sum_thr_drag))
-
-    # Computing velocities
-    vel = (1.0 - vel_damp) * vel + dt * acc
-
-    # Accelerometer measures so called "proper acceleration" that includes gravity with the opposite sign
-    accm = rot_tpose @ (acc + grav_arr)
-    return vel, acc, accm
 
 def main(argv):
     args = parse_quad_args(argv)
