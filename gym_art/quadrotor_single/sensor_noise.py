@@ -6,8 +6,8 @@ import matplotlib.pyplot as plt
 from math import exp
 from gym_art.quadrotor_single.quad_utils import quat2R, quatXquat
 from gym_art.quadrotor_multi.quad_utils import quat2R_numba, quatXquat_numba
-from gym_art.quadrotor_multi.sensor_noise import quat_from_small_angle_numba, rot2quat_numba
-from numba import njit
+from gym_art.quadrotor_multi.sensor_noise import quat_from_small_angle_numba, rot2quat_numba, \
+    add_noise_to_vel_acc_pos_omega_rot
 
 def quat_from_small_angle(theta):
     assert theta.shape == (3,)
@@ -220,34 +220,6 @@ class SensorNoise:
         self.gyro_bias = pi_g_d * self.gyro_bias + sigma_b_g_d * normal(0, 1, 3)
         return omega + self.gyro_bias + self.gyro_random_walk * normal(0, 1, 3) # + self.gyro_turn_on_bias_sigma * normal(0, 1, 3)
 
-@njit
-def add_noise_to_vel_acc_pos_omega_rot(
-        pos, vel, omega, acc, pos_rand_var, vel_rand_var, omega_rand_var,
-        acc_rand_var, rot_rand_var
-):
-    # add noise to position measurement
-    noisy_pos = pos + \
-                normal(loc=0., scale=pos_rand_var[0], size=3) + \
-                uniform(-pos_rand_var[1], pos_rand_var[1], 3)
-
-    # Add noise to linear velocity
-    noisy_vel = vel + \
-                normal(loc=0., scale=vel_rand_var[0], size=3) + \
-                uniform(-vel_rand_var[1], vel_rand_var[1], 3)
-
-    # Noise in omega
-    noisy_omega = omega + \
-                  normal(loc=0., scale=omega_rand_var, size=3)
-
-    # Noise in rotation
-    theta = normal(loc=0, scale=rot_rand_var[0], size=3) + \
-            uniform(-rot_rand_var[1], rot_rand_var[1], 3)
-
-    # Accelerometer noise
-    noisy_acc = acc + normal(loc=0., scale=acc_rand_var[0], size=3) + \
-                (acc * normal(loc=0., scale=acc_rand_var[1], size=3))
-
-    return noisy_pos, noisy_vel, noisy_omega, noisy_acc, theta
 
 if __name__ == "__main__":
     sens = SensorNoise()
