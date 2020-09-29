@@ -307,10 +307,9 @@ class QuadrotorDynamics(object):
         thrust_rot = thrust_cmds**0.5
         self.thrust_rot_damp = motor_tau * (thrust_rot - self.thrust_rot_damp) + self.thrust_rot_damp       
         self.thrust_cmds_damp = self.thrust_rot_damp**2
-
         ## Adding noise
-        # thrust_noise = thrust_cmds * self.thrust_noise.noise()
-        self.thrust_cmds_damp = np.clip(self.thrust_cmds_damp + thrust_noise, 0.0, 1.0)        
+        thrust_noise = thrust_cmds * thrust_noise
+        self.thrust_cmds_damp = np.clip(self.thrust_cmds_damp + thrust_noise, 0.0, 1.0)
 
         thrusts = self.thrust_max * self.angvel2thrust(self.thrust_cmds_damp, linearity=self.motor_linearity)
         #Prop crossproduct give torque directions
